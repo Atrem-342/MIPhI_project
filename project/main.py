@@ -57,6 +57,16 @@ def normalize_state(state: Optional[Dict[str, Any]]) -> Dict[str, Any]:
                 if nested_key not in state[key]:
                     state[key][nested_key] = nested_default
 
+    current_test = state.get("current_test")
+    if isinstance(current_test, dict):
+        normalized_test: Dict[int, str] = {}
+        for key, value in current_test.items():
+            try:
+                normalized_test[int(key)] = str(value).upper()
+            except (ValueError, TypeError):
+                continue
+        state["current_test"] = normalized_test if normalized_test else None
+
     return state
 
 
