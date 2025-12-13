@@ -1,3 +1,8 @@
+import hashlib
+import hmac
+import json
+import os
+import urllib.parse
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -15,6 +20,8 @@ from db.sqlite_store import (
     add_dialog_message,
     delete_dialog,
     rename_dialog,
+    get_dialog_by_owner,
+    link_dialog_owner,
 )
 from gigachat_api import get_access_token
 from main import process_user_message, create_initial_state, normalize_state
@@ -27,6 +34,7 @@ app = FastAPI(title="Lumira Web API")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 GREETING_TEXT = "Привет! Я готова помочь с учёбой."
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 
 class ChatRequest(BaseModel):
@@ -46,10 +54,30 @@ class RenameDialogRequest(BaseModel):
     title: str
 
 
-def create_dialog_with_greeting(title: Optional[str] = None):
+class TelegramSessionRequest(BaseModel):
+    init_data: str
+
+
+def create_dialog_with_greeting(
+    title: Optional[str] = None,
+    owner: Optional[tuple[str, str]] = None,
+):
     dialog = create_dialog(title, create_initial_state())
     add_dialog_message(dialog["id"], "assistant", GREETING_TEXT)
+    if owner:
+        link_dialog_owner(dialog["id"], owner[0], owner[1])
     return dialog
+
+
+def get_or_create_owner_dialog(
+    provider: str,
+    external_id: str,
+    title: Optional[str] = None,
+):
+    existing = get_dialog_by_owner(provider, external_id)
+    if existing:
+        return existing
+    return create_dialog_with_greeting(title, owner=(provider, external_id))
 
 
 def ensure_default_dialog() -> None:
@@ -58,6 +86,45 @@ def ensure_default_dialog() -> None:
 
 
 ensure_default_dialog()
+
+
+def verify_telegram_init_data(init_data: str) -> dict:
+    if not TELEGRAM_BOT_TOKEN:
+        raise HTTPException(
+            status_code=500,
+            detail="TELEGRAM_BOT_TOKEN не настроен на сервере.",
+        )
+    if not init_data:
+        raise HTTPException(status_code=400, detail="Пустые данные Telegram.")
+
+    parsed = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
+    init_hash = parsed.pop("hash", None)
+    if not init_hash:
+        raise HTTPException(status_code=400, detail="Нет hash в initData.")
+
+    data_check_string = "\n".join(
+        f"{k}={v}" for k, v in sorted(parsed.items())
+    )
+    secret_key = hashlib.sha256(TELEGRAM_BOT_TOKEN.encode()).digest()
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(calculated_hash, init_hash):
+        raise HTTPException(status_code=403, detail="Неверная подпись Telegram.")
+
+    user_json = parsed.get("user")
+    if not user_json:
+        raise HTTPException(status_code=400, detail="Нет user в initData.")
+
+    try:
+        user = json.loads(user_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Некорректный JSON user.") from exc
+
+    return user
 
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -313,10 +380,228 @@ HTML_PAGE = """
 </html>
 """
 
+TELEGRAM_PAGE = """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lumira Telegram</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    body {
+      font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: #0a0f1f;
+      margin: 0;
+      color: #f4f6ff;
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    .container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      padding: 16px;
+    }
+    .header {
+      margin-bottom: 12px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 1.25rem;
+    }
+    .status {
+      font-size: 0.9rem;
+      color: rgba(244, 246, 255, 0.75);
+    }
+    .chat {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 18px;
+      padding: 16px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    }
+    .message {
+      padding: 12px 16px;
+      border-radius: 14px;
+      line-height: 1.4;
+      font-size: 0.95rem;
+      max-width: 90%;
+    }
+    .message.user {
+      align-self: flex-end;
+      background: #4a6cf7;
+    }
+    .message.assistant {
+      align-self: flex-start;
+      background: rgba(255, 255, 255, 0.14);
+    }
+    form {
+      margin-top: 12px;
+      display: flex;
+      gap: 8px;
+    }
+    textarea {
+      flex: 1;
+      border-radius: 14px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      background: rgba(10, 15, 31, 0.85);
+      color: #f4f6ff;
+      padding: 12px;
+      resize: none;
+      min-height: 64px;
+      font-size: 0.95rem;
+      font-family: inherit;
+    }
+    button {
+      border: none;
+      border-radius: 14px;
+      padding: 0 20px;
+      background: #4a6cf7;
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>Lumira</h1>
+      <div class="status" id="status">Подключение…</div>
+    </div>
+    <div class="chat" id="tg-chat"></div>
+    <form id="tg-form">
+      <textarea id="tg-message" placeholder="Напишите сообщение…" required></textarea>
+      <button type="submit">Отправить</button>
+    </form>
+  </div>
+
+  <script>
+    const telegram = window.Telegram?.WebApp;
+    if (telegram) {
+      telegram.expand();
+      telegram.disableVerticalSwipes();
+    }
+
+    const statusEl = document.getElementById('status');
+    const chatWindow = document.getElementById('tg-chat');
+    const form = document.getElementById('tg-form');
+    const messageInput = document.getElementById('tg-message');
+
+    let dialogId = null;
+    let isSending = false;
+
+    function appendMessage(role, text) {
+      const div = document.createElement('div');
+      div.className = `message ${role}`;
+      div.textContent = text;
+      chatWindow.appendChild(div);
+      chatWindow.scrollTop = chatWindow.scrollHeight;
+      return div;
+    }
+
+    async function initTelegramChat() {
+      const initData = telegram?.initData || new URLSearchParams(window.location.search).get('tgWebAppData') || '';
+      try {
+        const response = await fetch('/telegram/session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ init_data: initData }),
+        });
+        if (!response.ok) {
+          const error = await response.json();
+          statusEl.textContent = error.detail || 'Ошибка инициализации.';
+          return;
+        }
+        const data = await response.json();
+        dialogId = data.dialog_id;
+        statusEl.textContent = data.title || 'Готово';
+        await loadMessages();
+      } catch (error) {
+        statusEl.textContent = 'Ошибка подключения: ' + error;
+      }
+    }
+
+    async function loadMessages() {
+      if (!dialogId) {
+        return;
+      }
+      chatWindow.innerHTML = '';
+      const response = await fetch(`/dialogs/${dialogId}/messages`);
+      if (!response.ok) {
+        statusEl.textContent = 'Не удалось загрузить сообщения.';
+        return;
+      }
+      const data = await response.json();
+      data.messages.forEach((msg) => {
+        appendMessage(msg.role === 'user' ? 'user' : 'assistant', msg.content);
+      });
+      if (data.messages.length === 0) {
+        appendMessage('assistant', 'Привет! Я готова помочь с учёбой.');
+      }
+    }
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (isSending || !dialogId) {
+        return;
+      }
+      const text = messageInput.value.trim();
+      if (!text) {
+        return;
+      }
+      appendMessage('user', text);
+      const pending = appendMessage('assistant', 'Обработка…');
+      messageInput.value = '';
+      isSending = true;
+      try {
+        const response = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dialog_id: dialogId, message: text }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          pending.textContent = data.detail || 'Ошибка запроса.';
+        } else {
+          pending.textContent = data.answer;
+        }
+      } catch (error) {
+        pending.textContent = 'Ошибка: ' + error;
+      } finally {
+        isSending = false;
+      }
+    });
+
+    messageInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        form.dispatchEvent(new Event('submit', { cancelable: true }));
+      }
+    });
+
+    initTelegramChat();
+  </script>
+</body>
+</html>
+"""
+
 
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTML_PAGE
+
+
+@app.get("/telegram", response_class=HTMLResponse)
+def telegram_page():
+    return TELEGRAM_PAGE
 
 
 @app.get("/dialogs")
@@ -356,6 +641,18 @@ def rename_dialog_endpoint(dialog_id: int, request: RenameDialogRequest):
         raise HTTPException(status_code=404, detail="Диалог не найден.")
     rename_dialog(dialog_id, request.title.strip() or "Без названия")
     return {"status": "ok"}
+
+
+@app.post("/telegram/session")
+def telegram_session(request: TelegramSessionRequest):
+    user = verify_telegram_init_data(request.init_data)
+    user_id = str(user.get("id"))
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Не удалось определить пользователя.")
+
+    title = f"Telegram · {user.get('first_name', '')}".strip() or "Telegram диалог"
+    dialog = get_or_create_owner_dialog("telegram", user_id, title=title)
+    return {"dialog_id": dialog["id"], "title": dialog["title"], "user": user}
 
 
 @app.post("/chat", response_model=ChatResponse)

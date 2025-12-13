@@ -1,10 +1,7 @@
-# db/sqlite_store.py
-
 import json
 import sqlite3
-from typing import List, Dict, Optional, Any
 from pathlib import Path
-
+from typing import Any, Dict, List, Optional
 
 DB_PATH = Path(__file__).resolve().parent.parent / "lumira.db"
 
@@ -48,6 +45,17 @@ def init_db() -> None:
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(dialog_id) REFERENCES dialogs(id) ON DELETE CASCADE
+        );
+        """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS dialog_owners (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dialog_id INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(provider, external_id),
             FOREIGN KEY(dialog_id) REFERENCES dialogs(id) ON DELETE CASCADE
         );
         """)
@@ -227,3 +235,38 @@ def get_dialog_messages(dialog_id: int, limit: int = 200) -> List[Dict[str, Any]
             (dialog_id, limit),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+def link_dialog_owner(dialog_id: int, provider: str, external_id: str) -> None:
+    """
+    Привязывает диалог к внешнему пользователю (например, Telegram).
+    """
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO dialog_owners (dialog_id, provider, external_id)
+            VALUES (?, ?, ?);
+            """,
+            (dialog_id, provider, external_id),
+        )
+        conn.commit()
+
+
+def get_dialog_by_owner(provider: str, external_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Возвращает диалог по внешнему идентификатору пользователя.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT dialog_id
+            FROM dialog_owners
+            WHERE provider = ? AND external_id = ?;
+            """,
+            (provider, external_id),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    return get_dialog(row["dialog_id"])
