@@ -133,6 +133,7 @@ HTML_PAGE = """
   <meta charset="UTF-8" />
   <title>Lumira</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <script async id="MathJax-script" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 </head>
 <body>
   <div class="layout">
@@ -184,6 +185,23 @@ HTML_PAGE = """
     let activeDialogId = null;
     let isSending = false;
 
+    function escapeHTML(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function formatMessageText(text) {
+      return escapeHTML(text).replace(/\n/g, '<br/>');
+    }
+
+    function renderMath(element) {
+      if (window.MathJax?.typesetPromise) {
+        MathJax.typesetPromise([element]).catch(() => {});
+      }
+    }
+
     function appendMessage(role, text) {
       const wrapper = document.createElement('div');
       wrapper.className = `message ${role}`;
@@ -194,12 +212,13 @@ HTML_PAGE = """
 
       const body = document.createElement('div');
       body.className = 'message-body';
-      body.textContent = text;
+      body.innerHTML = formatMessageText(text);
 
       wrapper.appendChild(title);
       wrapper.appendChild(body);
       chatWindow.appendChild(wrapper);
       chatWindow.scrollTop = chatWindow.scrollHeight;
+      renderMath(body);
       return body;
     }
 
@@ -340,13 +359,13 @@ HTML_PAGE = """
 
         const data = await response.json();
         if (!response.ok) {
-          pendingBody.textContent = data.detail || 'Ошибка запроса.';
+          pendingBody.innerHTML = formatMessageText(data.detail || 'Ошибка запроса.');
         } else {
-          pendingBody.textContent = data.answer;
+          pendingBody.innerHTML = formatMessageText(data.answer);
           await loadDialogs();
         }
       } catch (err) {
-        pendingBody.textContent = 'Ошибка подключения: ' + err;
+        pendingBody.innerHTML = formatMessageText('Ошибка подключения: ' + err);
       } finally {
         isSending = false;
       }
@@ -388,6 +407,7 @@ TELEGRAM_PAGE = """
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Lumira Telegram</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script async id="MathJax-script" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
   <style>
     body {
       font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -498,12 +518,30 @@ TELEGRAM_PAGE = """
     let dialogId = null;
     let isSending = false;
 
+    function escapeHTML(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }
+
+    function formatMessageText(text) {
+      return escapeHTML(text).replace(/\n/g, '<br/>');
+    }
+
+    function renderMath(element) {
+      if (window.MathJax?.typesetPromise) {
+        MathJax.typesetPromise([element]).catch(() => {});
+      }
+    }
+
     function appendMessage(role, text) {
       const div = document.createElement('div');
       div.className = `message ${role}`;
-      div.textContent = text;
+      div.innerHTML = formatMessageText(text);
       chatWindow.appendChild(div);
       chatWindow.scrollTop = chatWindow.scrollHeight;
+      renderMath(div);
       return div;
     }
 
@@ -569,12 +607,12 @@ TELEGRAM_PAGE = """
         });
         const data = await response.json();
         if (!response.ok) {
-          pending.textContent = data.detail || 'Ошибка запроса.';
+          pending.innerHTML = formatMessageText(data.detail || 'Ошибка запроса.');
         } else {
-          pending.textContent = data.answer;
+          pending.innerHTML = formatMessageText(data.answer);
         }
       } catch (error) {
-        pending.textContent = 'Ошибка: ' + error;
+        pending.innerHTML = formatMessageText('Ошибка: ' + error);
       } finally {
         isSending = false;
       }

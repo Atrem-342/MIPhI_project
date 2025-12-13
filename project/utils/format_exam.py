@@ -53,6 +53,14 @@ def format_exam(exam_text: str) -> Tuple[str, Dict[int, str], str]:
     if not questions_match:
         return "Ошибка: нет блока QUESTIONS.", {}, theme
 
-    questions_text = questions_match.group(1).strip()
+    raw_questions_text = questions_match.group(1).strip()
+
+    clean_lines = []
+    for line in raw_questions_text.splitlines():
+        stripped = line.strip()
+        if stripped in {"A)", "B)", "C)", "D)"}:
+            continue
+        clean_lines.append(line)
+    questions_text = "\n".join(clean_lines).strip()
 
     return questions_text, answers_dict, theme
