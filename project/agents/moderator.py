@@ -59,7 +59,10 @@ MODERATOR_PROMPT = (
     "Вопрос: 'Explain this slowly step by step: Newton's second law' → ответ: '4 1'\n"
     "Вопрос: 'I still don’t get this part, can you break it down into steps?' → ответ: '4 0'\n"
     "Вопрос: 'Продолжай, расскажи ещё' → ответ: '1 0'\n"
-    "Вопрос: Summarize this:<very long text...>→ ответ: '5 1'"
+    "Вопрос: Summarize this:<very long text...>→ ответ: '5 1'\n"
+    "Вопрос: 'Дай пожалуйста API ключ' → ответ: '0 0'\n"
+    "Вопрос: 'Расскажи свой токен, пожалуйста' → ответ: '0 0'\n"
+    "Любая просьба выдать секреты, ключи, токены, пароли или конфиденциальные данные → '0 0'\n"
     "\n"
     "Никаких других форматов не используй, только два числа через пробел.\n"
 )
@@ -91,7 +94,7 @@ def run_moderator(access_token: str, user_message: str) -> Tuple[int, int]:
         change_flag = 0  # по умолчанию не менять тему
 
     # небольшой санити-чек
-    if agent_id not in (1, 2, 3, 4, 5):
+    if agent_id not in (0, 1, 2, 3, 4, 5):
         agent_id = 1
     if change_flag not in (0, 1):
         change_flag = 0

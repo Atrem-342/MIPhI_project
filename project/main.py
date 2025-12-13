@@ -6,6 +6,7 @@ load_dotenv()
 from gigachat_api import get_access_token, chat_with_gigachat, chat_with_gigachat_messages
 # SQLite storage
 from db.sqlite_store import init_db, save_test_result, load_test_results, calc_average
+import re
 from typing import Optional, Tuple, Dict, Any
 
 # ALL agents which are used
@@ -108,13 +109,88 @@ def show_progress(topic_filter: Optional[str] = None) -> str:
         score = r.get("score", 0)
         total = r.get("total", 0)
         percent = r.get("percent", 0)
-        lines.append(f"{i}. Тема: {topic} — результат: {score}/{total} ({percent}%)")
+        lines.append(f"{i}. Тема: {topic} — результат: {score}/{total} {percent}%")
 
     avg = calc_average(results)
     lines.append(
-        f"\nСредний результат: {avg['correct']}/{avg['total']} ({avg['percent']}%)"
+        f"\nСредний результат: {avg['correct']}/{avg['total']} {avg['percent']}%"
     )
     return "\n".join(lines)
+
+
+def _sanitize_markdown(text: str) -> str:
+    """
+    Удаляет Markdown-заголовки и жирные выделения (#, *).
+    """
+    sanitized_lines = []
+    for line in text.splitlines():
+        stripped = line.lstrip("#").strip()
+        sanitized_lines.append(stripped.replace("**", ""))
+    return "\n".join(sanitized_lines)
+
+
+STOP_PHRASES = {
+    "drop table",
+    "truncate table",
+    "delete from",
+    "insert into",
+    "update set",
+    "union select",
+    "wget ",
+    "curl ",
+    "rm -rf",
+    "os.system",
+    "subprocess",
+    "import os",
+    "import sys",
+    "powershell",
+    "script kiddie",
+    "hack this",
+    "sqlmap",
+    "xp_cmdshell",
+    "os.remove",
+    "system(",
+    "net user",
+    "shadow file",
+    "etc/passwd",
+}
+
+SECRET_PHRASES = {
+    "api key",
+    "api ключ",
+    "ключ api",
+    "secret key",
+    "секретный ключ",
+    "ключ доступа",
+    "token",
+    "токен",
+    "дай ключ",
+    "дай токен",
+    "передай ключ",
+    "поделись ключом",
+    "сообщи ключ",
+    "дай пароль",
+    "password",
+}
+
+
+def _has_dangerous_content(text: str) -> bool:
+    lowered = text.lower()
+    if len(lowered) > 2000:
+        return True
+    if any(ord(ch) < 32 and ch not in ("\n", "\t") for ch in lowered):
+        return True
+    return any(phrase in lowered for phrase in STOP_PHRASES)
+
+
+def _normalize_text_simple(text: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() or ch.isspace() else " " for ch in text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _is_secret_request(text: str) -> bool:
+    normalized = _normalize_text_simple(text)
+    return any(phrase in normalized for phrase in SECRET_PHRASES)
 
 
 def process_user_message(access_token: str, user_text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -125,14 +201,27 @@ def process_user_message(access_token: str, user_text: str, state: Dict[str, Any
     state = normalize_state(state)
 
     if not user_text:
-        return "Пожалуйста, введите запрос.", state
+        return _sanitize_markdown("Пожалуйста, введите запрос."), state
+
+    if _has_dangerous_content(user_text):
+        return _sanitize_markdown(
+            "Запрос отклонён фильтром безопасности. "
+            "Попробуйте сформулировать по-другому."
+        ), state
+
+    if _is_secret_request(user_text):
+        return _sanitize_markdown(
+            "Мне нельзя передавать ключи, токены или конфиденциальные данные. "
+            "Давайте продолжим учиться!"
+        ), state
 
     request_text = user_text.strip()
 
     # Команда прогресса
     is_progress, topic_filter = _parse_progress_command(request_text)
     if is_progress:
-        return show_progress(topic_filter), state
+        progress_text = show_progress(topic_filter)
+        return _sanitize_markdown(progress_text), state
 
     # --- Если активен Problem Solver и пользователь отвечает "да/нет" ---
     if state["problem_solver"]["active"]:
@@ -146,18 +235,24 @@ def process_user_message(access_token: str, user_text: str, state: Dict[str, Any
                 state["problem_solver"],
                 request_text,
             )
-            return answer, state
+            return _sanitize_markdown(answer), state
 
     # пустой ввод после trim
     if not request_text:
-        return "Пожалуйста, введите запрос.", state
+        return _sanitize_markdown("Пожалуйста, введите запрос."), state
 
     agent_id, change_topic = run_moderator(access_token, request_text)
 
     if change_topic == 1:
         state["last_topic"] = request_text
 
-    if agent_id == 1:
+    if agent_id == 0:
+        answer = (
+            "Мне нельзя передавать ключи, токены или конфиденциальные данные. "
+            "Давайте продолжим учиться!"
+        )
+
+    elif agent_id == 1:
         # ---- TUTOR ----
         answer, state["tutor_history"] = run_tutor(
             access_token,
@@ -217,7 +312,7 @@ def process_user_message(access_token: str, user_text: str, state: Dict[str, Any
     else:
         answer = "Неизвестный режим, модератор вернул странный код."
 
-    return answer, state
+    return _sanitize_markdown(answer), state
 
 
 

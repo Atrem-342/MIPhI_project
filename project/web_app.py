@@ -133,6 +133,17 @@ HTML_PAGE = """
   <meta charset="UTF-8" />
   <title>Lumira</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <script>
+    window.MathJax = {
+      tex: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+      },
+      options: {
+        skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+      },
+    };
+  </script>
   <script async id="MathJax-script" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 </head>
 <body>
@@ -185,17 +196,6 @@ HTML_PAGE = """
     let activeDialogId = null;
     let isSending = false;
 
-    function escapeHTML(str) {
-      return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-    }
-
-    function formatMessageText(text) {
-      return escapeHTML(text).replace(/\n/g, '<br/>');
-    }
-
     function renderMath(element) {
       if (window.MathJax?.typesetPromise) {
         MathJax.typesetPromise([element]).catch(() => {});
@@ -212,7 +212,7 @@ HTML_PAGE = """
 
       const body = document.createElement('div');
       body.className = 'message-body';
-      body.innerHTML = formatMessageText(text);
+      body.textContent = text;
 
       wrapper.appendChild(title);
       wrapper.appendChild(body);
@@ -359,13 +359,15 @@ HTML_PAGE = """
 
         const data = await response.json();
         if (!response.ok) {
-          pendingBody.innerHTML = formatMessageText(data.detail || 'Ошибка запроса.');
+          pendingBody.textContent = data.detail || 'Ошибка запроса.';
         } else {
-          pendingBody.innerHTML = formatMessageText(data.answer);
+          pendingBody.textContent = data.answer;
           await loadDialogs();
         }
+        renderMath(pendingBody);
       } catch (err) {
-        pendingBody.innerHTML = formatMessageText('Ошибка подключения: ' + err);
+        pendingBody.textContent = 'Ошибка подключения: ' + err;
+        renderMath(pendingBody);
       } finally {
         isSending = false;
       }
@@ -407,6 +409,16 @@ TELEGRAM_PAGE = """
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Lumira Telegram</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script>
+    window.MathJax = window.MathJax || {};
+    window.MathJax.tex = {
+      inlineMath: [['$', '$'], ['\\(', '\\)']],
+      displayMath: [['$$', '$$'], ['\\[', '\\]']],
+    };
+    window.MathJax.options = {
+      skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+    };
+  </script>
   <script async id="MathJax-script" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
   <style>
     body {
@@ -518,17 +530,6 @@ TELEGRAM_PAGE = """
     let dialogId = null;
     let isSending = false;
 
-    function escapeHTML(str) {
-      return str
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-    }
-
-    function formatMessageText(text) {
-      return escapeHTML(text).replace(/\n/g, '<br/>');
-    }
-
     function renderMath(element) {
       if (window.MathJax?.typesetPromise) {
         MathJax.typesetPromise([element]).catch(() => {});
@@ -538,7 +539,7 @@ TELEGRAM_PAGE = """
     function appendMessage(role, text) {
       const div = document.createElement('div');
       div.className = `message ${role}`;
-      div.innerHTML = formatMessageText(text);
+      div.textContent = text;
       chatWindow.appendChild(div);
       chatWindow.scrollTop = chatWindow.scrollHeight;
       renderMath(div);
@@ -607,12 +608,14 @@ TELEGRAM_PAGE = """
         });
         const data = await response.json();
         if (!response.ok) {
-          pending.innerHTML = formatMessageText(data.detail || 'Ошибка запроса.');
+          pending.textContent = data.detail || 'Ошибка запроса.';
         } else {
-          pending.innerHTML = formatMessageText(data.answer);
+          pending.textContent = data.answer;
         }
+        renderMath(pending);
       } catch (error) {
-        pending.innerHTML = formatMessageText('Ошибка: ' + error);
+        pending.textContent = 'Ошибка: ' + error;
+        renderMath(pending);
       } finally {
         isSending = false;
       }
