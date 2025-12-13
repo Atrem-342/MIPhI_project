@@ -1,21 +1,33 @@
 # gigachat_api.py
+import base64
+import os
+from typing import Optional
+
 import requests
 import urllib3
-import base64
+from dotenv import load_dotenv
 from langsmith import traceable
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+load_dotenv()
+
+
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(
+            f"Environment variable '{name}' is not set. "
+            "Add it to your .env or hosting platform configuration."
+        )
+    return value
+
 
 # ==== НАСТРОЙКИ ====
-# Твои client_id и client_secret из Сбера
-CLIENT_ID = "9bae76f2-8b96-494d-a3f3-e575c0523495"
-CLIENT_SECRET = "5b6f3176-15d4-416b-bd07-cc5baaf580df"
-
-# Какие права нужны
-SCOPE = "GIGACHAT_API_PERS"   # или другой scope, если так выдали
-
-# Какая модель GigaChat
-MODEL = "GigaChat"  # можно взять любую из /api/v1/models
+CLIENT_ID = _require_env("GIGACHAT_CLIENT_ID")
+CLIENT_SECRET = _require_env("GIGACHAT_CLIENT_SECRET")
+SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
+MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat")
+RQUID = os.getenv("GIGACHAT_RQUID", "fd648f05-0e2b-41bf-8753-5c197c62e598")
 
 
 def get_access_token() -> str:
@@ -34,7 +46,7 @@ def get_access_token() -> str:
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "Accept": "application/json",
-        "RqUID": "fd648f05-0e2b-41bf-8753-5c197c62e598",  # можно любой UUID
+        "RqUID": RQUID,
         "Authorization": f"Basic {auth_b64}",
     }
 
@@ -70,7 +82,7 @@ def chat_with_gigachat_messages(access_token: str, messages: list[dict]) -> str:
     return data["choices"][0]["message"]["content"]
 
 
-def chat_with_gigachat(access_token: str,user_message: str) -> str:
+def chat_with_gigachat(access_token: str, user_message: str) -> str:
     """
     Отправляем сообщение в GigaChat и получаем ответ .
     """
@@ -101,4 +113,3 @@ def chat_with_gigachat(access_token: str,user_message: str) -> str:
     data = resp.json()
 
     return data["choices"][0]["message"]["content"]
-
