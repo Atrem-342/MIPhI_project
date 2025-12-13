@@ -190,7 +190,12 @@ def _normalize_text_simple(text: str) -> str:
 
 def _is_secret_request(text: str) -> bool:
     normalized = _normalize_text_simple(text)
-    return any(phrase in normalized for phrase in SECRET_PHRASES)
+    padded = f" {normalized} "
+    for phrase in SECRET_PHRASES:
+        target = f" {phrase} "
+        if target in padded:
+            return True
+    return False
 
 
 def process_user_message(access_token: str, user_text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -246,13 +251,7 @@ def process_user_message(access_token: str, user_text: str, state: Dict[str, Any
     if change_topic == 1:
         state["last_topic"] = request_text
 
-    if agent_id == 0:
-        answer = (
-            "Мне нельзя передавать ключи, токены или конфиденциальные данные. "
-            "Давайте продолжим учиться!"
-        )
-
-    elif agent_id == 1:
+    if agent_id == 1:
         # ---- TUTOR ----
         answer, state["tutor_history"] = run_tutor(
             access_token,
