@@ -5,7 +5,14 @@ load_dotenv()
 
 from gigachat_api import get_access_token, chat_with_gigachat, chat_with_gigachat_messages
 # SQLite storage
-from db.sqlite_store import init_db, save_test_result, load_test_results, calc_average
+from db.sqlite_store import (
+    init_db,
+    save_test_result,
+    load_test_results,
+    calc_average,
+    save_learned_material,
+    load_learned_material,
+)
 import re
 from typing import Optional, Tuple, Dict, Any
 
@@ -198,6 +205,12 @@ def _is_secret_request(text: str) -> bool:
     return False
 
 
+def _remember_material(topic: Optional[str], source: str, content: str):
+    if not topic or not content:
+        return
+    save_learned_material(topic, source, content)
+
+
 def process_user_message(access_token: str, user_text: str, state: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
     """
     Обрабатывает один запрос пользователя и возвращает текст ответа.
@@ -258,6 +271,8 @@ def process_user_message(access_token: str, user_text: str, state: Dict[str, Any
             request_text,
             state["tutor_history"],
         )
+        topic_for_memory = state.get("last_topic")
+        _remember_material(topic_for_memory, "tutor", answer)
 
     elif agent_id == 2:
         # ---- EXAMINER ----
@@ -275,7 +290,8 @@ def process_user_message(access_token: str, user_text: str, state: Dict[str, Any
         else:
             topic = state["last_topic"]
 
-        raw_test = run_examiner(access_token, topic)
+        materials = load_learned_material(topic, limit=5)
+        raw_test = run_examiner(access_token, topic, materials)
         questions_text, answers_dict, theme = format_exam(raw_test)
 
         state["last_topic"] = theme
@@ -304,10 +320,14 @@ def process_user_message(access_token: str, user_text: str, state: Dict[str, Any
         # ---- PROBLEM SOLVER ----
         answer, ps_state = start_problem_solver(access_token, request_text)
         state["problem_solver"] = ps_state
+        topic_for_memory = state.get("last_topic") or request_text
+        _remember_material(topic_for_memory, "problem_solver", answer)
 
     elif agent_id == 5:
         # ---- SUMMARIZER ----
         answer = run_summarizer(access_token, request_text)
+        topic_for_memory = state.get("last_topic") or request_text[:100]
+        _remember_material(topic_for_memory, "summarizer", answer)
     else:
         answer = "Неизвестный режим, модератор вернул странный код."
 

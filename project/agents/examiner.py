@@ -1,5 +1,7 @@
 # agents/examiner.py
 
+from typing import List, Dict, Optional
+
 from gigachat_api import chat_with_gigachat
 from langsmith import traceable
 
@@ -37,7 +39,7 @@ EXAMINER_PROMPT = (
 )
 
 @traceable(name="examiner_generate_test")
-def run_examiner(access_token: str, topic: str) -> str:
+def run_examiner(access_token: str, topic: str, materials: Optional[List[Dict]] = None) -> str:
     """
     Агент-тестировщик.
     Добавляет к сообщению пользователя инструкцию, что модель — Examiner.
@@ -48,6 +50,18 @@ def run_examiner(access_token: str, topic: str) -> str:
         "Количество вопросов: 5"
     )
 
+    if materials:
+        hints = "\n".join(
+            f"- ({item.get('source')}) {item.get('content')}"
+            for item in materials
+            if item.get("content")
+        )
+        if hints:
+            prompt += (
+                "\n\nОпирайся на следующий изученный материал:\n"
+                f"{hints}\n"
+                "Не выходи за пределы этих фактов при составлении вопросов."
+            )
 
     # Используем уже существующую функцию из gigachat_api
     return chat_with_gigachat(access_token, prompt)

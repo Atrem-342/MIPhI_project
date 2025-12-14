@@ -59,6 +59,15 @@ def init_db() -> None:
             FOREIGN KEY(dialog_id) REFERENCES dialogs(id) ON DELETE CASCADE
         );
         """)
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS learned_material (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic TEXT NOT NULL,
+            source TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        """)
         conn.commit()
 
 
@@ -233,6 +242,41 @@ def get_dialog_messages(dialog_id: int, limit: int = 200) -> List[Dict[str, Any]
             LIMIT ?;
             """,
             (dialog_id, limit),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def save_learned_material(topic: Optional[str], source: str, content: str) -> None:
+    if not topic or not content:
+        return
+    cleaned = content.strip()
+    if not cleaned:
+        return
+    snippet = cleaned[:1500]
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO learned_material (topic, source, content)
+            VALUES (?, ?, ?);
+            """,
+            (topic, source, snippet),
+        )
+        conn.commit()
+
+
+def load_learned_material(topic: Optional[str], limit: int = 5) -> List[Dict[str, Any]]:
+    if not topic:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, topic, source, content, created_at
+            FROM learned_material
+            WHERE topic = ?
+            ORDER BY id DESC
+            LIMIT ?;
+            """,
+            (topic, limit),
         ).fetchall()
     return [dict(r) for r in rows]
 

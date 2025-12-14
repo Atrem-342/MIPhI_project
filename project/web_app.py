@@ -5,7 +5,7 @@ import os
 import urllib.parse
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -22,9 +22,11 @@ from db.sqlite_store import (
     rename_dialog,
     get_dialog_by_owner,
     link_dialog_owner,
+    save_learned_material,
 )
 from gigachat_api import get_access_token
 from main import process_user_message, create_initial_state, normalize_state
+from utils.ocr_space import parse_image_with_ocr_space, OCRSpaceError
 
 
 ACCESS_TOKEN = get_access_token()
@@ -126,6 +128,17 @@ def verify_telegram_init_data(init_data: str) -> dict:
 
     return user
 
+
+def get_telegram_user_from_request(request: Request) -> Optional[str]:
+    init_data = request.headers.get("X-Telegram-Init-Data")
+    if not init_data:
+        return None
+    user = verify_telegram_init_data(init_data)
+    user_id = str(user.get("id"))
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Некорректные данные Telegram.")
+    return user_id
+
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -171,6 +184,24 @@ HTML_PAGE = """
         <button id="rename-dialog" class="ghost">Переименовать</button>
       </header>
 
+      <section class="ocr-panel">
+        <h2>Распознать текст с изображения</h2>
+        <form id="ocr-form" class="ocr-form">
+          <input type="file" id="ocr-file" name="file" accept="image/png,image/jpeg" required />
+          <div class="ocr-fields">
+            <input type="text" id="ocr-topic" placeholder="Тема (опционально)" />
+            <select id="ocr-language">
+              <option value="eng" selected>English</option>
+              <option value="rus">Русский</option>
+              <option value="spa">Español</option>
+              <option value="deu">Deutsch</option>
+            </select>
+          </div>
+          <button type="submit">Распознать</button>
+        </form>
+        <div id="ocr-output" class="ocr-output"></div>
+      </section>
+
       <div class="chat-window" id="chat-window"></div>
 
       <form id="chat-form" class="input-area">
@@ -191,6 +222,8 @@ HTML_PAGE = """
     const newDialogBtn = document.getElementById('new-dialog');
     const renameDialogBtn = document.getElementById('rename-dialog');
     const dialogTitleEl = document.getElementById('dialog-title');
+    const ocrForm = document.getElementById('ocr-form');
+    const ocrOutput = document.getElementById('ocr-output');
 
     let dialogs = [];
     let activeDialogId = null;
@@ -395,6 +428,54 @@ HTML_PAGE = """
       }
     });
 
+    if (ocrForm && ocrOutput) {
+      ocrForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+
+        const fileInput = document.getElementById('ocr-file');
+        if (!fileInput.files.length) {
+          ocrOutput.textContent = 'Выберите изображение.';
+          return;
+        }
+
+        const topicInput = document.getElementById('ocr-topic');
+        const languageInput = document.getElementById('ocr-language');
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+        if (topicInput.value.trim()) {
+          formData.append('topic', topicInput.value.trim());
+        }
+        formData.append('language', languageInput.value || 'eng');
+
+        ocrOutput.textContent = 'Распознавание...';
+        try {
+          const response = await fetch('/ocr', {
+            method: 'POST',
+            body: formData,
+          });
+          const data = await response.json();
+          if (!response.ok) {
+            ocrOutput.textContent = data.detail || 'Ошибка распознавания.';
+            return;
+          }
+
+          const summaryBlock = data.summary
+            ? `<p><strong>Резюме:</strong> ${data.summary}</p>`
+            : '';
+
+          ocrOutput.innerHTML = `
+            <p><strong>Тема:</strong> ${data.topic || 'не указана'}</p>
+            <p><strong>Текст:</strong></p>
+            <pre>${data.text}</pre>
+            ${summaryBlock}
+          `;
+          renderMath(ocrOutput);
+        } catch (error) {
+          ocrOutput.textContent = 'Ошибка загрузки: ' + error;
+        }
+      });
+    }
+
     loadDialogs();
   </script>
 </body>
@@ -548,6 +629,7 @@ TELEGRAM_PAGE = """
 
     async function initTelegramChat() {
       const initData = telegram?.initData || new URLSearchParams(window.location.search).get('tgWebAppData') || '';
+      window.__tgInitData = initData;
       try {
         const response = await fetch('/telegram/session', {
           method: 'POST',
@@ -573,7 +655,10 @@ TELEGRAM_PAGE = """
         return;
       }
       chatWindow.innerHTML = '';
-      const response = await fetch(`/dialogs/${dialogId}/messages`);
+      const headers = window.__tgInitData
+        ? { 'X-Telegram-Init-Data': window.__tgInitData }
+        : {};
+      const response = await fetch(`/dialogs/${dialogId}/messages`, { headers });
       if (!response.ok) {
         statusEl.textContent = 'Не удалось загрузить сообщения.';
         return;
@@ -601,9 +686,15 @@ TELEGRAM_PAGE = """
       messageInput.value = '';
       isSending = true;
       try {
+        const headers = {
+          'Content-Type': 'application/json',
+        };
+        if (window.__tgInitData) {
+          headers['X-Telegram-Init-Data'] = window.__tgInitData;
+        }
         const response = await fetch('/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ dialog_id: dialogId, message: text }),
         });
         const data = await response.json();
@@ -657,10 +748,17 @@ def create_dialog_endpoint(request: CreateDialogRequest):
 
 
 @app.get("/dialogs/{dialog_id}/messages")
-def read_dialog_messages(dialog_id: int):
+def read_dialog_messages(dialog_id: int, request: Request):
     dialog = get_dialog(dialog_id)
     if not dialog:
         raise HTTPException(status_code=404, detail="Диалог не найден.")
+
+    tg_user_id = get_telegram_user_from_request(request)
+    if tg_user_id:
+        owned = get_dialog_by_owner("telegram", tg_user_id)
+        if not owned or owned["id"] != dialog_id:
+            raise HTTPException(status_code=403, detail="Нет доступа к этому диалогу.")
+
     messages = get_dialog_messages(dialog_id)
     return {"dialog": {"id": dialog["id"], "title": dialog["title"]}, "messages": messages}
 
@@ -684,6 +782,42 @@ def rename_dialog_endpoint(dialog_id: int, request: RenameDialogRequest):
     return {"status": "ok"}
 
 
+@app.post("/ocr")
+async def ocr_upload(
+    request: Request,
+    topic: Optional[str] = Form(None),
+    language: str = Form("eng"),
+    file: UploadFile = File(...),
+):
+    allowed_types = {"image/png", "image/jpeg", "image/jpg"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Допустимы только PNG или JPEG изображения.")
+
+    content = await file.read()
+    max_size = 5 * 1024 * 1024
+    if len(content) > max_size:
+        raise HTTPException(status_code=400, detail="Файл слишком большой (максимум 5 МБ).")
+
+    try:
+        text = parse_image_with_ocr_space(file.filename or "image", content, language=language)
+    except OCRSpaceError as exc:
+        raise HTTPException(status_code=502, detail=f"OCR ошибка: {exc}") from exc
+
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Не удалось распознать текст на изображении.")
+
+    topic_to_use = topic or "OCR Upload"
+    save_learned_material(topic_to_use, f"ocr:{file.filename or 'image'}", text)
+
+    summary = ""
+    try:
+        summary = run_summarizer(ACCESS_TOKEN, text[:4000])
+    except Exception:
+        summary = ""
+
+    return {"text": text, "summary": summary, "topic": topic_to_use}
+
+
 @app.post("/telegram/session")
 def telegram_session(request: TelegramSessionRequest):
     user = verify_telegram_init_data(request.init_data)
@@ -697,22 +831,28 @@ def telegram_session(request: TelegramSessionRequest):
 
 
 @app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
-    message = request.message.strip()
+def chat(request_data: ChatRequest, req: Request):
+    message = request_data.message.strip()
     if not message:
         raise HTTPException(status_code=400, detail="Введите сообщение.")
 
-    dialog = get_dialog(request.dialog_id)
+    dialog = get_dialog(request_data.dialog_id)
     if not dialog:
         raise HTTPException(status_code=404, detail="Диалог не найден.")
+
+    tg_user_id = get_telegram_user_from_request(req)
+    if tg_user_id:
+        owned = get_dialog_by_owner("telegram", tg_user_id)
+        if not owned or owned["id"] != dialog["id"]:
+            raise HTTPException(status_code=403, detail="Нет доступа к этому диалогу.")
 
     state = normalize_state(dialog.get("state"))
 
     try:
-        add_dialog_message(request.dialog_id, "user", message)
+        add_dialog_message(request_data.dialog_id, "user", message)
         answer, new_state = process_user_message(ACCESS_TOKEN, message, state)
-        update_dialog_state(request.dialog_id, new_state)
-        add_dialog_message(request.dialog_id, "assistant", answer)
+        update_dialog_state(request_data.dialog_id, new_state)
+        add_dialog_message(request_data.dialog_id, "assistant", answer)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
