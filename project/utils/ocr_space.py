@@ -2,6 +2,7 @@ import os
 from typing import Optional
 
 import requests
+from langsmith import traceable
 
 OCR_SPACE_API_KEY = os.getenv("OCR_SPACE_API_KEY")
 OCR_SPACE_API_URL = os.getenv("OCR_SPACE_API_URL", "https://api.ocr.space/parse/image")
@@ -11,6 +12,7 @@ class OCRSpaceError(Exception):
     """Raised when OCR.Space returns an error."""
 
 
+@traceable(name="ocr_space_parse")
 def parse_image_with_ocr_space(
     filename: str,
     content: bytes,

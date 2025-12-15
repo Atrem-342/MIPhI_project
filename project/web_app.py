@@ -1,11 +1,12 @@
 import hashlib
 import hmac
 import json
+import logging
 import os
 import urllib.parse
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -22,12 +23,14 @@ from db.sqlite_store import (
     rename_dialog,
     get_dialog_by_owner,
     link_dialog_owner,
-    save_learned_material,
 )
 from gigachat_api import get_access_token
 from main import process_user_message, create_initial_state, normalize_state
 from utils.ocr_space import parse_image_with_ocr_space, OCRSpaceError
 
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("lumira.web")
 
 ACCESS_TOKEN = get_access_token()
 init_db()
@@ -184,28 +187,22 @@ HTML_PAGE = """
         <button id="rename-dialog" class="ghost">Переименовать</button>
       </header>
 
-      <section class="ocr-panel">
-        <h2>Распознать текст с изображения</h2>
-        <form id="ocr-form" class="ocr-form">
-          <input type="file" id="ocr-file" name="file" accept="image/png,image/jpeg" required />
-          <div class="ocr-fields">
-            <input type="text" id="ocr-topic" placeholder="Тема (опционально)" />
-            <select id="ocr-language">
-              <option value="eng" selected>English</option>
-              <option value="rus">Русский</option>
-              <option value="spa">Español</option>
-              <option value="deu">Deutsch</option>
-            </select>
-          </div>
-          <button type="submit">Распознать</button>
-        </form>
-        <div id="ocr-output" class="ocr-output"></div>
-      </section>
-
       <div class="chat-window" id="chat-window"></div>
 
-      <form id="chat-form" class="input-area">
-        <textarea id="message" name="message" placeholder="Спросите что угодно…" required></textarea>
+      <form id="chat-form" class="input-area" enctype="multipart/form-data">
+        <textarea id="message" name="message" placeholder="Спросите что угодно…"></textarea>
+        <div class="attachment-row">
+          <label class="file-upload">
+            <input type="file" id="attach-file" name="file" accept="image/png,image/jpeg,application/pdf" />
+            <span>📎 Прикрепить файл (PNG/JPEG/PDF)</span>
+          </label>
+          <select id="file-language" name="language">
+            <option value="rus" selected>Русский текст</option>
+            <option value="eng">English text</option>
+            <option value="ukr">Українська</option>
+          </select>
+          <span id="file-name" class="file-name">Файл не выбран</span>
+        </div>
         <div class="actions">
           <span class="hint">Shift + Enter — перенос строки</span>
           <button type="submit">Отправить</button>
@@ -222,12 +219,23 @@ HTML_PAGE = """
     const newDialogBtn = document.getElementById('new-dialog');
     const renameDialogBtn = document.getElementById('rename-dialog');
     const dialogTitleEl = document.getElementById('dialog-title');
-    const ocrForm = document.getElementById('ocr-form');
-    const ocrOutput = document.getElementById('ocr-output');
+    const fileInput = document.getElementById('attach-file');
+    const fileLanguage = document.getElementById('file-language');
+    const fileNameLabel = document.getElementById('file-name');
 
     let dialogs = [];
     let activeDialogId = null;
     let isSending = false;
+
+    if (fileInput && fileNameLabel) {
+      fileInput.addEventListener('change', () => {
+        if (fileInput.files.length > 0) {
+          fileNameLabel.textContent = fileInput.files[0].name;
+        } else {
+          fileNameLabel.textContent = 'Файл не выбран';
+        }
+      });
+    }
 
     function renderMath(element) {
       if (window.MathJax?.typesetPromise) {
@@ -371,28 +379,63 @@ HTML_PAGE = """
         return;
       }
       const userText = messageInput.value.trim();
-      if (!userText) {
+      const hasFile = fileInput && fileInput.files.length > 0;
+      const selectedFile = hasFile ? fileInput.files[0] : null;
+      const selectedLanguage = fileLanguage ? fileLanguage.value : 'rus';
+      if (!userText && !hasFile) {
         return;
       }
       if (!activeDialogId) {
         await createDialog();
       }
 
-      appendMessage('user', userText);
+      console.log('Sending chat request', {
+        dialogId: activeDialogId,
+        hasFile: Boolean(selectedFile),
+        fileName: selectedFile?.name || null,
+        fileSize: selectedFile?.size || null,
+        fileType: selectedFile?.type || null,
+        language: selectedLanguage,
+        hasText: Boolean(userText),
+      });
+
+      const fileLabel = selectedFile
+        ? `📎 ${selectedFile.name}`
+        : '';
+      const displayText = userText || fileLabel;
+      appendMessage('user', displayText);
       messageInput.value = '';
       const pendingBody = appendMessage('assistant', 'Обработка...');
 
       isSending = true;
       try {
-        const response = await fetch('/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dialog_id: activeDialogId, message: userText }),
-        });
+        let response;
+        if (selectedFile) {
+          const formData = new FormData();
+          formData.append('dialog_id', activeDialogId);
+          formData.append('message', userText);
+          formData.append('language', selectedLanguage);
+          formData.append('file', selectedFile, selectedFile.name);
+          response = await fetch('/chat', { method: 'POST', body: formData });
+        } else {
+          response = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dialog_id: activeDialogId, message: userText }),
+          });
+        }
+
+        if (fileInput) {
+          fileInput.value = '';
+          if (fileNameLabel) {
+            fileNameLabel.textContent = 'Файл не выбран';
+          }
+        }
 
         const data = await response.json();
         if (!response.ok) {
           pendingBody.textContent = data.detail || 'Ошибка запроса.';
+          console.error('Chat request failed', data, response.status);
         } else {
           pendingBody.textContent = data.answer;
           await loadDialogs();
@@ -427,54 +470,6 @@ HTML_PAGE = """
         form.dispatchEvent(new Event('submit', { cancelable: true }));
       }
     });
-
-    if (ocrForm && ocrOutput) {
-      ocrForm.addEventListener('submit', async (event) => {
-        event.preventDefault();
-
-        const fileInput = document.getElementById('ocr-file');
-        if (!fileInput.files.length) {
-          ocrOutput.textContent = 'Выберите изображение.';
-          return;
-        }
-
-        const topicInput = document.getElementById('ocr-topic');
-        const languageInput = document.getElementById('ocr-language');
-        const formData = new FormData();
-        formData.append('file', fileInput.files[0]);
-        if (topicInput.value.trim()) {
-          formData.append('topic', topicInput.value.trim());
-        }
-        formData.append('language', languageInput.value || 'eng');
-
-        ocrOutput.textContent = 'Распознавание...';
-        try {
-          const response = await fetch('/ocr', {
-            method: 'POST',
-            body: formData,
-          });
-          const data = await response.json();
-          if (!response.ok) {
-            ocrOutput.textContent = data.detail || 'Ошибка распознавания.';
-            return;
-          }
-
-          const summaryBlock = data.summary
-            ? `<p><strong>Резюме:</strong> ${data.summary}</p>`
-            : '';
-
-          ocrOutput.innerHTML = `
-            <p><strong>Тема:</strong> ${data.topic || 'не указана'}</p>
-            <p><strong>Текст:</strong></p>
-            <pre>${data.text}</pre>
-            ${summaryBlock}
-          `;
-          renderMath(ocrOutput);
-        } catch (error) {
-          ocrOutput.textContent = 'Ошибка загрузки: ' + error;
-        }
-      });
-    }
 
     loadDialogs();
   </script>
@@ -782,42 +777,6 @@ def rename_dialog_endpoint(dialog_id: int, request: RenameDialogRequest):
     return {"status": "ok"}
 
 
-@app.post("/ocr")
-async def ocr_upload(
-    request: Request,
-    topic: Optional[str] = Form(None),
-    language: str = Form("eng"),
-    file: UploadFile = File(...),
-):
-    allowed_types = {"image/png", "image/jpeg", "image/jpg"}
-    if file.content_type not in allowed_types:
-        raise HTTPException(status_code=400, detail="Допустимы только PNG или JPEG изображения.")
-
-    content = await file.read()
-    max_size = 5 * 1024 * 1024
-    if len(content) > max_size:
-        raise HTTPException(status_code=400, detail="Файл слишком большой (максимум 5 МБ).")
-
-    try:
-        text = parse_image_with_ocr_space(file.filename or "image", content, language=language)
-    except OCRSpaceError as exc:
-        raise HTTPException(status_code=502, detail=f"OCR ошибка: {exc}") from exc
-
-    if not text.strip():
-        raise HTTPException(status_code=400, detail="Не удалось распознать текст на изображении.")
-
-    topic_to_use = topic or "OCR Upload"
-    save_learned_material(topic_to_use, f"ocr:{file.filename or 'image'}", text)
-
-    summary = ""
-    try:
-        summary = run_summarizer(ACCESS_TOKEN, text[:4000])
-    except Exception:
-        summary = ""
-
-    return {"text": text, "summary": summary, "topic": topic_to_use}
-
-
 @app.post("/telegram/session")
 def telegram_session(request: TelegramSessionRequest):
     user = verify_telegram_init_data(request.init_data)
@@ -830,13 +789,106 @@ def telegram_session(request: TelegramSessionRequest):
     return {"dialog_id": dialog["id"], "title": dialog["title"], "user": user}
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(request_data: ChatRequest, req: Request):
-    message = request_data.message.strip()
-    if not message:
-        raise HTTPException(status_code=400, detail="Введите сообщение.")
+async def _process_uploaded_file(file: UploadFile, language: str) -> str:
+    allowed_types = {"image/png", "image/jpeg", "image/jpg", "application/pdf"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="Допустимы PNG, JPEG или PDF файлы.")
 
-    dialog = get_dialog(request_data.dialog_id)
+    content = await file.read()
+    max_size = 5 * 1024 * 1024
+    if len(content) > max_size:
+        raise HTTPException(status_code=400, detail="Файл слишком большой (максимум 5 МБ).")
+
+    logger.info(
+        "OCR upload: name=%s content_type=%s size=%d lang=%s",
+        file.filename,
+        file.content_type,
+        len(content),
+        language,
+    )
+
+    try:
+        text = parse_image_with_ocr_space(
+            file.filename or "upload",
+            content,
+            language=language or "rus",
+        )
+    except OCRSpaceError as exc:
+        raise HTTPException(status_code=502, detail=f"OCR ошибка: {exc}") from exc
+
+    cleaned = (text or "").strip()
+    if not cleaned:
+        logger.warning("OCR upload %s produced empty text", file.filename)
+        raise HTTPException(status_code=502, detail="Не удалось распознать текст в файле.")
+    logger.info(
+        "OCR upload %s successfully parsed %d characters",
+        file.filename,
+        len(cleaned),
+    )
+    return cleaned
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(req: Request):
+    content_type = req.headers.get("content-type", "")
+    dialog_id: Optional[int] = None
+    message = ""
+    upload: Optional[UploadFile] = None
+    language = "rus"
+
+    if content_type.startswith("application/json"):
+        payload = await req.json()
+        data = ChatRequest(**payload)
+        dialog_id = data.dialog_id
+        message = (data.message or "").strip()
+    else:
+        form = await req.form()
+        logger.info("Multipart form keys: %s", list(form.keys()))
+        for key, value in form.multi_items():
+            logger.info(" - %s => %s", key, type(value).__name__)
+        raw_dialog_id = form.get("dialog_id")
+        message = (form.get("message") or "").strip()
+        language = (form.get("language") or "rus").strip() or "rus"
+        candidate = form.get("file")
+        logger.info("Primary file candidate type: %s", type(candidate).__name__)
+        if hasattr(candidate, "filename"):
+            upload = candidate  # treat as UploadFile-like
+        elif "file" in form:
+            possible = form["file"]
+            logger.info("Secondary file lookup type: %s", type(possible).__name__)
+            if hasattr(possible, "filename"):
+                upload = possible
+        if upload is None:
+            file_items = form.getlist("file")
+            logger.info(
+                "getlist('file') types: %s",
+                [type(item).__name__ for item in file_items],
+            )
+            for item in file_items:
+                if hasattr(item, "filename"):
+                    upload = item
+                    break
+        if isinstance(raw_dialog_id, str) and raw_dialog_id.isdigit():
+            dialog_id = int(raw_dialog_id)
+        elif isinstance(raw_dialog_id, int):
+            dialog_id = raw_dialog_id
+
+    if dialog_id is None:
+        raise HTTPException(status_code=400, detail="Не указан dialog_id.")
+
+    if not message and upload is None:
+        raise HTTPException(status_code=400, detail="Введите сообщение или прикрепите файл.")
+
+    logger.info(
+        "Chat request dialog=%s type=%s has_file=%s msg_len=%d lang=%s",
+        dialog_id,
+        content_type.split(";")[0],
+        bool(upload),
+        len(message),
+        language,
+    )
+
+    dialog = get_dialog(dialog_id)
     if not dialog:
         raise HTTPException(status_code=404, detail="Диалог не найден.")
 
@@ -848,11 +900,28 @@ def chat(request_data: ChatRequest, req: Request):
 
     state = normalize_state(dialog.get("state"))
 
+    if upload is not None:
+        ocr_text = await _process_uploaded_file(upload, language)
+        snippet = ocr_text[:4000]
+        prefix = (
+            f"Пользователь загрузил файл «{upload.filename or 'без названия'}».\n"
+            f"Распознанный текст:\n{snippet}"
+        )
+        if message:
+            message = f"{prefix}\n\nДополнительный вопрос пользователя:\n{message}"
+        else:
+            message = prefix
+        logger.info(
+            "Dialog %s: appended OCR text (%d chars) to user message",
+            dialog_id,
+            len(snippet),
+        )
+
     try:
-        add_dialog_message(request_data.dialog_id, "user", message)
+        add_dialog_message(dialog_id, "user", message)
         answer, new_state = process_user_message(ACCESS_TOKEN, message, state)
-        update_dialog_state(request_data.dialog_id, new_state)
-        add_dialog_message(request_data.dialog_id, "assistant", answer)
+        update_dialog_state(dialog_id, new_state)
+        add_dialog_message(dialog_id, "assistant", answer)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
